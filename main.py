@@ -104,28 +104,39 @@ def main(args):
             output = model(batch)
             losses = model.losses(*output)
 
-            lambda_ = 0.2
-            final_loss = (lambda_ * losses['cls_loss'] + (1-lambda_) * losses['reg_loss']) / batch_size
+            # Loss weights from paper: λ1=0.1, λ2=0.3, λ3=0.1, λ4=0.7
+            # total = λ1*L_focal_uni + λ2*L_focal_mul + λ3*(L_KL_v2m + L_KL_a2m) + λ4*L_iou
+            final_loss = (
+                0.1 * losses['uni_focal_loss']
+                + 0.3 * losses['mul_focal_loss']
+                + 0.1 * losses['kl_loss']
+                + 0.7 * losses['reg_loss']
+            ) / batch_size
             optimizer.zero_grad()
             final_loss.backward()
             optimizer.step()
 
-            cls_loss = losses["cls_loss"].item()/batch_size
-            reg_loss = losses["reg_loss"].item()/batch_size
-            batch_loss = final_loss.item()
-            total_cls_loss += cls_loss
+            uni_focal_loss = losses["uni_focal_loss"].item() / batch_size
+            mul_focal_loss = losses["mul_focal_loss"].item() / batch_size
+            kl_loss        = losses["kl_loss"].item() / batch_size
+            reg_loss       = losses["reg_loss"].item() / batch_size
+            batch_loss     = final_loss.item()
+            total_cls_loss += mul_focal_loss
             total_reg_loss += reg_loss
-            total_loss += batch_loss
+            total_loss     += batch_loss
 
-            writer.add_scalar('Loss/cls_loss', cls_loss, epoch * len(train_data_loader) + i)
-            writer.add_scalar('Loss/reg_loss', reg_loss, epoch * len(train_data_loader) + i)
-            writer.add_scalar('Loss/total_loss', batch_loss, epoch * len(train_data_loader) + i)
+            step = epoch * len(train_data_loader) + i
+            writer.add_scalar('Loss/uni_focal_loss', uni_focal_loss, step)
+            writer.add_scalar('Loss/mul_focal_loss', mul_focal_loss, step)
+            writer.add_scalar('Loss/kl_loss',        kl_loss,        step)
+            writer.add_scalar('Loss/reg_loss',        reg_loss,       step)
+            writer.add_scalar('Loss/total_loss',      batch_loss,     step)
 
             if global_step < warmup_steps:
                 warmup_scheduler.step()
             else:
                 cosine_scheduler.step()
-            print(f"Epoch {epoch+1}/{num_epochs}, Iter {i+1}/{len(train_data_loader)}, Total Loss: {batch_loss:.3f},  cls Loss: {cls_loss:.3f}, reg Loss: {reg_loss:.3f}, Time: {time.time() - start_time:.3f}s", end='\r')
+            print(f"Epoch {epoch+1}/{num_epochs}, Iter {i+1}/{len(train_data_loader)}, Total: {batch_loss:.3f}, uni_focal: {uni_focal_loss:.3f}, mul_focal: {mul_focal_loss:.3f}, kl: {kl_loss:.3f}, reg: {reg_loss:.3f}, Time: {time.time() - start_time:.3f}s", end='\r')
         # save checkpoint to disk
         if epoch % cfg['train']['save_epochs'] == 0:
             checkpoint = {

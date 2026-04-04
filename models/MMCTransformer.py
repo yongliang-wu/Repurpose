@@ -1,5 +1,5 @@
 from .transformer import *
-from .losses import ctr_diou_loss_1d, sigmoid_focal_loss
+from .losses import ctr_diou_loss_1d, sigmoid_focal_loss, kl_divergence_loss
 from .softnms import soft_nms_intervals_cpu
 import numpy as np
 
@@ -27,7 +27,20 @@ class MMCTransformer(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.Linear(hidden_dim, 1),
         )
-       
+
+        # Unimodal cls heads for Multi-Modal Alignment Guider (KL divergence alignment)
+        self.vis_cls_head = nn.Sequential(
+            nn.Linear(d_model, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, 1),
+        )
+
+        self.aud_cls_head = nn.Sequential(
+            nn.Linear(d_model, hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, 1),
+        )
+
         self.reg_head = nn.Sequential(
             nn.Linear(d_model, hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
@@ -73,12 +86,15 @@ class MMCTransformer(nn.Module):
 
         feats = self.feature_map(feats)
 
-        # out_cls: List[B, #cls, seq_len]
+        # out_cls: [B, seq_len, 1] — multi-modal branch
         out_cls_logits = self.cls_head(feats)
-        # out_offset: List[B, 2, seq_len]
+        # unimodal branches for alignment guider
+        out_vis_cls_logits = self.vis_cls_head(vis_feats)
+        out_aud_cls_logits = self.aud_cls_head(aud_feats)
+        # out_offset: [B, seq_len, 2]
         out_offsets = self.reg_head(feats)
 
-        return masks, out_cls_logits, out_offsets, gt_cls_labels, gt_offsets
+        return masks, out_cls_logits, out_vis_cls_logits, out_aud_cls_logits, out_offsets, gt_cls_labels, gt_offsets
 
     @property
     def device(self):
@@ -89,38 +105,45 @@ class MMCTransformer(nn.Module):
 
     def losses(
         self, masks,
-        out_cls_logits, out_offsets,
+        out_cls_logits, out_vis_cls_logits, out_aud_cls_logits,
+        out_offsets,
         gt_cls_labels, gt_offsets
     ):
-        # mask: batch_size, max_len
-        # out_cls_logits: List[B, seq_len, 1]
-        # out_offsets: List[B, seq_len, 2]
-        # gt_cls_labels: List[B, seq_len, 1]
-        # gt_offsets: List[B, seq_len, 2]
+        # masks: [B, 1, max_len]
+        # out_cls_logits / out_vis_cls_logits / out_aud_cls_logits: [B, seq_len, 1]
+        # out_offsets: [B, seq_len, 2]
+        # gt_cls_labels: [B, seq_len]
+        # gt_offsets: [B, seq_len, 2]
 
-        # 1. classification loss
-        gt_cls_labels = gt_cls_labels.unsqueeze(-1)
-        cls_loss = sigmoid_focal_loss(out_cls_logits, gt_cls_labels)
+        gt_cls_labels = gt_cls_labels.unsqueeze(-1)           # [B, T, 1]
+        masks = masks.transpose(1, 2).contiguous()            # [B, T, 1]
 
-        masks = masks.transpose(1, 2).contiguous()
-        cls_loss = cls_loss * masks
+        # 1. Uni-modal focal loss: L_focal^uni = focal(vis) + focal(aud)
+        vis_focal = sigmoid_focal_loss(out_vis_cls_logits, gt_cls_labels)
+        aud_focal = sigmoid_focal_loss(out_aud_cls_logits, gt_cls_labels)
+        uni_focal_loss = ((vis_focal + aud_focal) * masks).sum()
 
-        cls_loss = cls_loss.sum()   
+        # 2. Multi-modal focal loss: L_focal^mul = focal(multi)
+        mul_focal = sigmoid_focal_loss(out_cls_logits, gt_cls_labels)
+        mul_focal_loss = (mul_focal * masks).sum()
 
-        # 2. regression loss
+        # 3. KL divergence alignment: L_KL^{v->m} + L_KL^{a->m}
+        kl_v2m = kl_divergence_loss(out_vis_cls_logits, out_cls_logits, masks)
+        kl_a2m = kl_divergence_loss(out_aud_cls_logits, out_cls_logits, masks)
+        kl_loss = kl_v2m + kl_a2m
+
+        # 4. Regression loss (IoU): only on positive positions
         cls_mask = (gt_cls_labels != 0).float()
-
         combined_mask = masks * cls_mask
-
-        reg_loss = ctr_diou_loss_1d(
-            out_offsets,
-            gt_offsets,
-        )
-
+        reg_loss = ctr_diou_loss_1d(out_offsets, gt_offsets)
         reg_loss = (reg_loss * combined_mask.squeeze(-1)).sum()
 
-        return {'cls_loss'   : cls_loss,
-                'reg_loss'   : reg_loss}
+        return {
+            'uni_focal_loss': uni_focal_loss,
+            'mul_focal_loss': mul_focal_loss,
+            'kl_loss'       : kl_loss,
+            'reg_loss'      : reg_loss,
+        }
 
 
     @torch.no_grad()
@@ -177,7 +200,7 @@ class MMCTransformer(nn.Module):
     @torch.no_grad()
     def inference_(self, batch, inference_settings):
         
-        masks, out_cls_logits, out_offsets, gt_cls_labels, gt_offsets = self.forward(batch)
+        masks, out_cls_logits, out_vis_cls_logits, out_aud_cls_logits, out_offsets, gt_cls_labels, gt_offsets = self.forward(batch)
 
         # batch seq_len
         pred_prob = out_cls_logits.squeeze(-1)

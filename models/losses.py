@@ -1,6 +1,34 @@
 import torch
 from torch.nn import functional as F
 
+
+def kl_divergence_loss(
+    p_logits: torch.Tensor,
+    q_logits: torch.Tensor,
+    mask: torch.Tensor,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    KL divergence from unimodal branch to multi-modal branch.
+    KL(P || Q) = sum(P * log(P / Q))
+
+    Per the paper's Multi-Modal Alignment Guider:
+      L_KL^{v->m} = sum_i y_i^v * log(y_i^v / y_i^m)
+      L_KL^{a->m} = sum_i y_i^a * log(y_i^a / y_i^m)
+
+    Args:
+        p_logits: unimodal branch logits (vis or aud), shape [B, T, 1]
+        q_logits: multi-modal branch logits, shape [B, T, 1]
+        mask: valid position mask, shape [B, T, 1]
+        eps: small value to avoid log(0)
+    Returns:
+        Scalar loss value.
+    """
+    p = torch.sigmoid(p_logits).clamp(min=eps, max=1.0 - eps)
+    q = torch.sigmoid(q_logits).clamp(min=eps, max=1.0 - eps)
+    loss = p * torch.log(p / q)
+    return (loss * mask).sum()
+
 @torch.jit.script
 def sigmoid_focal_loss(
     inputs: torch.Tensor,
