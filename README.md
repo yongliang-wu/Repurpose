@@ -15,7 +15,7 @@ With the rise of **short-form video platforms** like TikTok, Instagram Reels, an
 - Optimizing for **direct publishing** on social media.
 
 Short-form videos typically vary in length from 0 seconds to 3 minutes, with most content being around 60 seconds, depending on the platform’s specific guidelines and audience preferences. This time frame ensures that the video remains concise, engaging, and optimized for rapid consumption.
-<img width="958" alt="image" src="https://github.com/user-attachments/assets/5985db0b-7a3c-4064-8dff-ed1ef019ccac" />
+<img width="958" alt="Video repurposing task overview" src="https://github.com/user-attachments/assets/5985db0b-7a3c-4064-8dff-ed1ef019ccac" />
 
 
 ### About **Repurpose-10K**
